@@ -1,0 +1,6 @@
+# Ignore all JSON files everywhere
+**/*.json
+
+# Ignore Python cache folders everywhere
+**/__pycache__/
+**/*.py[cod]
