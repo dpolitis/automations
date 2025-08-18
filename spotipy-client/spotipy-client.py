@@ -1,58 +1,82 @@
-from flask import Flask, jsonify
-import spotipy
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse, RedirectResponse
+import os, spotipy, json
 from spotipy.oauth2 import SpotifyOAuth
+from pathlib import Path
 
-# Flask app initialization
-app = Flask(__name__)
-
-# Set your app credentials and redirect URI
-CLIENT_ID = ""
-CLIENT_SECRET = ""
-REDIRECT_URI = "http://127.0.0.1:5000/callback"
-
-# Define the required scope
+# --- Config ---
+CLIENT_ID = os.getenv("CLIENT_ID")
+CLIENT_SECRET = os.getenv("CLIENT_SECRET")
+REDIRECT_URI = os.getenv("REDIRECT_URI")
 SCOPE = "user-read-playback-state"
+TOKEN_FILE = Path("spotify_token.json")
 
-# Initialize SpotifyOAuth for authentication
-sp_oauth = SpotifyOAuth(
-    client_id=CLIENT_ID,
-    client_secret=CLIENT_SECRET,
-    redirect_uri=REDIRECT_URI,
-    scope=SCOPE
-)
+# --- FastAPI app ---
+app = FastAPI()
 
-# Retrieve and refresh the token
+# --- Spotify OAuth ---
+sp_oauth = SpotifyOAuth(client_id=CLIENT_ID,
+                        client_secret=CLIENT_SECRET,
+                        redirect_uri=REDIRECT_URI,
+                        scope=SCOPE)
+
+
+def load_token():
+  if TOKEN_FILE.exists():
+    return json.loads(TOKEN_FILE.read_text())
+  return None
+
+
+def save_token(token_info):
+  TOKEN_FILE.write_text(json.dumps(token_info))
+
+
 def get_spotify_client():
-    token_info = sp_oauth.get_cached_token()  # Retrieves the token from cache
-    if not token_info or sp_oauth.is_token_expired(token_info):
-        token_info = sp_oauth.refresh_access_token(token_info['refresh_token'])
-    return spotipy.Spotify(auth=token_info['access_token'])
+  token_info = load_token()
+  if not token_info:
+    raise Exception("No token found. Authenticate first.")
+  if sp_oauth.is_token_expired(token_info):
+    token_info = sp_oauth.refresh_access_token(token_info['refresh_token'])
+    save_token(token_info)
+  return spotipy.Spotify(auth=token_info['access_token'])
 
-# Route to fetch the currently playing track
-@app.route('/current-track', methods=['GET'])
 
-def get_current_track():
-    try:
-        spotify = get_spotify_client()
-        current_playback = spotify.current_playback()
+# --- Routes ---
+@app.get("/login")
+async def login():
+  url = sp_oauth.get_authorize_url()
+  return RedirectResponse(url)
 
-        if current_playback and current_playback.get('is_playing'):
-            if not current_playback.get('context'):
-                return jsonify({"track": "podcast", "artist": "podcast"})
 
-            track_name = current_playback['item']['name']
-            artist_name = ", ".join([artist['name'] for artist in current_playback['item']['artists']])
-            return jsonify({"track": track_name, "artist": artist_name})
- 
-        # Default response if no track is playing
-        return jsonify({"track": "no_playback", "artist": "no_playback"})
+@app.get("/callback")
+async def callback(request: Request):
+  code = request.query_params.get("code")
+  if not code:
+    return JSONResponse({"error": "No code provided"})
+  try:
+    token_info = sp_oauth.get_access_token(code)
+    save_token(token_info)
+    return JSONResponse({"status": "success", "token": token_info})
+  except Exception as e:
+    return JSONResponse({"error": str(e)})
 
-    except Exception as e:
-        print(f"Unexpected Error: {e}")
 
-    # Fallback response for any error
-    return jsonify({"track": None, "artist": None})
+@app.get("/current-track")
+async def get_current_track():
+  try:
+    spotify = get_spotify_client()
+    current_playback = spotify.current_playback()
 
-# Main function to run the Flask server
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+    if current_playback and current_playback.get('is_playing'):
+      if not current_playback.get('context'):
+        return {"track": "podcast", "artist": "podcast"}
+      track_name = current_playback['item']['name']
+      artist_name = ", ".join(
+          [artist['name'] for artist in current_playback['item']['artists']])
+      return {"track": track_name, "artist": artist_name}
+
+    return {"track": "no_playback", "artist": "no_playback"}
+
+  except Exception as e:
+    print(f"Unexpected Error: {e}")
+    return {"track": None, "artist": None}
